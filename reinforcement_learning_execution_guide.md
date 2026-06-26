@@ -109,23 +109,101 @@ python eureka.py \
 
 ---
 
-## 📊 ステップ 4: 成果物（ポリシー）の確認と選定
+## 📊 ステップ 4: 成果物の自動集計と候補ポリシーの選定
 
 すべてのイテレーションが完了すると、`outputs/` ディレクトリ内に以下のデータが保存されます。
 
 *   **`outputs/eureka/`**: Gemma 4が書いた各世代の報酬関数コード (`reward_v1.py` など) と、LLMの思考プロセス (`response_iter_N.txt`)。
 *   **`logs/rl_training/`**: 強化学習のウェイト（チェックポイント `.pt` ファイル）や TensorBoard のログ。
 
-**TensorBoardでログを確認する**:
+多数のシミュレーション結果を毎回TensorBoardで目視確認するのは現実的ではありません。まずはスクリプトで定量指標を集計し、上位候補だけをTensorBoardや動画で確認します。
+
+### 1. 定量指標を集計する
+`logs/rl_training/` と `outputs/eureka/` を走査し、各イテレーションの評価指標と成果物パスを `outputs/experiment_summary.json` にまとめます。
+
+集計対象の例:
+*   成功率 (`success_rate`)
+*   平均報酬 (`mean_reward`)
+*   平均関節トルク (`mean_torque`)
+*   アクションの滑らかさ (`action_smoothness`)
+*   衝突率 (`collision_rate`)
+*   報酬関数コードのパス
+*   チェックポイント (`model_best.pt` など) のパス
+
+スコア関数の例:
+```text
+score = success_rate * 1.0
+        + mean_reward * 0.01
+        - mean_torque * 0.01
+        - collision_rate * 0.5
+        - action_smoothness_penalty * 0.1
+```
+
+出力例:
+```json
+{
+  "task_name": "Isaac-Reach-Franka-v0",
+  "candidates": [
+    {
+      "iteration": 3,
+      "score": 0.842,
+      "success_rate": 0.885,
+      "mean_torque": 38.4,
+      "checkpoint": "logs/rl_training/iter_3/model_best.pt",
+      "reward_code": "outputs/eureka/reward_v3.py"
+    }
+  ]
+}
+```
+
+### 2. 上位候補だけを人間が確認する
+自動集計でTop 3程度まで絞り込んだ後、TensorBoardや再生動画で挙動を確認します。
+
+**TensorBoardで候補ログを確認する**:
 ```bash
 tensorboard --logdir logs/rl_training/
-# ブラウザから http://localhost:6006 にアクセスして成功率や報酬の推移グラフを確認します
+# ブラウザから http://localhost:6006 にアクセスし、上位候補の成功率・報酬・トルク推移を確認します
 ```
-最も成功率が高く、かつ関節トルク（エネルギー消費）が低い世代のモデルチェックポイント（例: `model_best.pt`）を特定します。
+
+最終採用するポリシーは `outputs/experiment_selection.json` に記録します。
+
+```json
+{
+  "selected_iteration": 3,
+  "selected_checkpoint": "logs/rl_training/iter_3/model_best.pt",
+  "selected_reward_code": "outputs/eureka/reward_v3.py",
+  "reason": "成功率が最も高く、平均トルクも低いため",
+  "approved_by_human": true
+}
+```
+
+このステップでは、候補選定を決定的・再現可能な処理として扱います。LLMにはベストポリシーの決定を直接任せず、LLMは後段のレポート文章化に使います。
 
 ---
 
-## 📥 ステップ 5: VLA微調整用「動作データセット」のエクスポート
+## 📝 ステップ 5: 実験レポートの生成
+
+候補選定が完了したら、`generate_experiment_log.py` を使って実験レポートを生成します。
+
+このスクリプトの役割は「候補選定」ではなく、選定済みの結果・トークン使用量・実行統計をもとにMarkdownレポートを作ることです。
+
+入力として想定するファイル:
+*   **`outputs/experiment_summary.json`**: 自動集計された各イテレーションの評価結果
+*   **`outputs/experiment_selection.json`**: 人間が確認して採用した最終ポリシー
+*   **`outputs/token_usage_log.csv`**: LLM呼び出しごとのトークン使用量
+
+```bash
+python generate_experiment_log.py
+```
+
+生成されるレポート例:
+```text
+outputs/experiment_log_Isaac-Reach-Franka-v0_20260626_160000.md
+```
+
+---
+
+## 📥 ステップ 6: VLA微調整用「動作データセット」のエクスポート
 
 選定した最高のポリシーをシミュレータ内で動作させ、VLAモデルの模倣学習（FT）に必要な「お手本データ」としてエクスポートします。
 
